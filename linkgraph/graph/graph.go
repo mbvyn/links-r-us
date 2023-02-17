@@ -6,7 +6,7 @@ import (
 )
 
 // Link encapsulates all information about a link discovered
-//by the Links 'R' Us crawler.
+// by the Links 'R' Us crawler.
 type Link struct {
 	// A unique identifier for the link.
 	ID uuid.UUID
@@ -19,7 +19,7 @@ type Link struct {
 }
 
 // Edge describes a graph edge that originates
-//from Src and terminates at Dst.
+// from Src and terminates at Dst.
 type Edge struct {
 	// A unique identifier for the edge.
 	ID uuid.UUID
@@ -69,7 +69,7 @@ type Graph interface {
 	UpsertLink(link *Link) error
 
 	// FindLink looks up a link by its ID.
-	FindLink(id uuid.UUID)
+	FindLink(id uuid.UUID) (*Link, error)
 
 	// UpsertEdge creates a new edge or updates an existing edge.
 	UpsertEdge(edge *Edge) error
