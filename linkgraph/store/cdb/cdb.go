@@ -26,12 +26,31 @@ RETURNING id, updated_at
 `
 	edgesInPartitionQuery = "SELECT id, scr,dst, updated_at, FROM edges WHERE scr >= $1 AND scr < $2 AND updated_at < $3"
 	removeStaleEdgesQuery = "DELETE FROM edges WHERE scr = $1 AND updated_at < %2"
+
+	// Compile-time check for ensuring CockroachDbGraph implements Graph.
+	_ graph.Graph = (*CockroachDBGraph)(nil)
 )
 
 // CockroachDBGraph implements a graph that persists its links and edges to a
 // cockroachdb instance.
 type CockroachDBGraph struct {
 	db *sql.DB
+}
+
+// NewCockroachDbGraph returns a CockroachDbGraph instance that connects to the cockroachdb
+// instance specified by dsn.
+func NewCockroachDbGraph(dsn string) (*CockroachDBGraph, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CockroachDBGraph{db: db}, nil
+}
+
+// Close terminates the connection to the backing cockroachdb instance.
+func (c *CockroachDBGraph) Close() error {
+	return c.db.Close()
 }
 
 // UpsertLink creates a new link or updates an existing link.
