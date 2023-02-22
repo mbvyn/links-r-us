@@ -20,12 +20,12 @@ RETURNING id, retrieved_at
 	linksInPartitionQuery = "SELECT id, url, retrieved_at FROM links WHERE id >= $1 AND id < $2 AND retrieved_at < $3"
 
 	upsertEdgesQuery = `
-INSERT INTO edges(src, dst, update_at) VALUES($1, $2, NOW())
+INSERT INTO edges(src, dst, updated_at) VALUES($1, $2, NOW())
 ON CONFLICT (src, dst) DO UPDATE SET updated_at = NOW()
 RETURNING id, updated_at
 `
-	edgesInPartitionQuery = "SELECT id, scr,dst, updated_at, FROM edges WHERE scr >= $1 AND scr < $2 AND updated_at < $3"
-	removeStaleEdgesQuery = "DELETE FROM edges WHERE scr = $1 AND updated_at < %2"
+	edgesInPartitionQuery = "SELECT id, src,dst, updated_at FROM edges WHERE src >= $1 AND src < $2 AND updated_at < $3"
+	removeStaleEdgesQuery = "DELETE FROM edges WHERE src = $1 AND updated_at < $2"
 
 	// Compile-time check for ensuring CockroachDbGraph implements Graph.
 	_ graph.Graph = (*CockroachDBGraph)(nil)
@@ -95,7 +95,7 @@ func (c *CockroachDBGraph) Links(fromID, toID uuid.UUID, accessedBefore time.Tim
 
 // UpsertEdge creates a new edge or updates an existing edge.
 func (c *CockroachDBGraph) UpsertEdge(edge *graph.Edge) error {
-	row := c.db.QueryRow(upsertEdgesQuery, edge.Src, edge.Dst, edge.UpdatedAt)
+	row := c.db.QueryRow(upsertEdgesQuery, edge.Src, edge.Dst)
 
 	if err := row.Scan(&edge.ID, &edge.UpdatedAt); err != nil {
 		if isForeignKeyViolationError(err) {
