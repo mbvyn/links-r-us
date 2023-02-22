@@ -2,6 +2,7 @@ package cdb
 
 import (
 	"database/sql"
+	"github.com/joho/godotenv"
 	gc "gopkg.in/check.v1"
 	"links-r-us/linkgraph/graph/graphtest"
 	"os"
@@ -19,9 +20,10 @@ type CockroachDbGraphTestSuite struct {
 func Test(t *testing.T) { gc.TestingT(t) }
 
 func (s *CockroachDbGraphTestSuite) SetUpSuite(c *gc.C) {
+	err := godotenv.Load("../../../.env")
 	dsn := os.Getenv("CDB_DSN")
 
-	if dsn == "" {
+	if dsn == "" || err != nil {
 		c.Skip("Missing CDB_DSN env var; skipping cockroachdb-backed graph test suite")
 	}
 
