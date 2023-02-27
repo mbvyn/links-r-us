@@ -4,6 +4,7 @@ go 1.19
 
 require (
 	github.com/blevesearch/bleve v1.0.14
+	github.com/elastic/go-elasticsearch v0.0.0
 	github.com/google/uuid v1.3.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.7
