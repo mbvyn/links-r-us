@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"links-r-us/textindexer/index"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/elastic/go-elasticsearch"
-	"github.com/elastic/go-elasticsearch/esapi"
+	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 )
@@ -90,10 +91,15 @@ type ElasticSearchIndexer struct {
 
 // NewElasticSearchIndexer creates a text indexer that uses an in-memory
 // bleve instance for indexing documents.
-func NewElasticSearchIndexer(esNode []string, syncUpdates bool) (*ElasticSearchIndexer, error) {
+func NewElasticSearchIndexer(esNode []string, certPath string, apiKey string, syncUpdates bool) (*ElasticSearchIndexer, error) {
+	cert, _ := os.ReadFile(certPath)
+
 	cfg := elasticsearch.Config{
 		Addresses: esNode,
+		CACert:    cert,
+		APIKey:    apiKey,
 	}
+
 	es, err := elasticsearch.NewClient(cfg)
 	if err != nil {
 		return nil, err
