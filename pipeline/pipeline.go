@@ -41,3 +41,27 @@ func sourceWorker(ctx context.Context, source Source, outCh chan<- Payload, errC
 		maybeEmitError(wrappedErr, errCh)
 	}
 }
+
+// sinkWorker implements a worker that reads Payload instances from an input
+// channel (the output of the last pipeline stage) and passes them to the
+// provided sink.
+func sinkWorker(ctx context.Context, sink Sink, inCh <-chan Payload, errCh chan<- error) {
+	for {
+		select {
+		case payload, ok := <-inCh:
+			if !ok {
+				return
+			}
+
+			if err := sink.Consume(ctx, payload); err != nil {
+				wrappedErr := xerrors.Errorf("pipeline sink: %w", err)
+				maybeEmitError(wrappedErr, errCh)
+				return
+			}
+			payload.MarkAsProcessed()
+		case <-ctx.Done():
+			// Asked to shutdown
+			return
+		}
+	}
+}
