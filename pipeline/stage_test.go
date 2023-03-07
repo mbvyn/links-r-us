@@ -4,22 +4,20 @@ import (
 	"context"
 	"fmt"
 	"links-r-us/pipeline"
-	"testing"
+	"sort"
+	"time"
 
-	"golang.org/x/xerrors"
 	gc "gopkg.in/check.v1"
 )
 
-var _ = gc.Suite(new(PipelineTestSuite))
+var _ = gc.Suite(new(StageTestSuite))
 
-func Test(t *testing.T) { gc.TestingT(t) }
+type StageTestSuite struct{}
 
-type PipelineTestSuite struct{}
-
-func (s *PipelineTestSuite) TestDataFlow(c *gc.C) {
+func (s StageTestSuite) TestFIFO(c *gc.C) {
 	stages := make([]pipeline.StageRunner, 10)
 	for i := 0; i < len(stages); i++ {
-		stages[i] = testStage{c: c}
+		stages[i] = pipeline.FIFO(makePassThroughProcessor())
 	}
 
 	src := &sourceStub{data: stringPayloads(3)}
@@ -32,147 +30,136 @@ func (s *PipelineTestSuite) TestDataFlow(c *gc.C) {
 	assertAllProcessed(c, src.data)
 }
 
-func (s *PipelineTestSuite) TestProcessorErrorHandling(c *gc.C) {
-	expErr := xerrors.New("some error")
-	stages := make([]pipeline.StageRunner, 10)
-	for i := 0; i < len(stages); i++ {
-		var err error
-		if i == 5 {
-			err = expErr
-		}
+func (s StageTestSuite) TestFixedWorkerPool(c *gc.C) {
+	numWorkers := 10
+	syncCh := make(chan struct{})
+	rendezvousCh := make(chan struct{})
 
-		stages[i] = testStage{c: c, err: err}
+	proc := pipeline.ProcessorFunc(func(_ context.Context, _ pipeline.Payload) (pipeline.Payload, error) {
+		// Signal that we have reached the sync point and wait for the
+		// green light to proceed by the test code.
+		syncCh <- struct{}{}
+		<-rendezvousCh
+		return nil, nil
+	})
+
+	src := &sourceStub{data: stringPayloads(numWorkers)}
+
+	p := pipeline.New(pipeline.FixedWorkerPool(proc, numWorkers))
+	doneCh := make(chan struct{})
+	go func() {
+		err := p.Process(context.TODO(), src, nil)
+		c.Assert(err, gc.IsNil)
+		close(doneCh)
+	}()
+
+	// Wait for all workers to reach sync point. This means that each input
+	// from the source is currently handled by a worker in parallel.
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case <-syncCh:
+		case <-time.After(10 * time.Second):
+			c.Fatalf("timed out waiting for worker %d to reach sync point", i)
+		}
 	}
 
-	src := &sourceStub{data: stringPayloads(3)}
-	sink := new(sinkStub)
-
-	p := pipeline.New(stages...)
-	err := p.Process(context.TODO(), src, sink)
-	c.Assert(err, gc.ErrorMatches, "(?s).*some error.*")
+	// Allow workers to proceed and wait for the pipeline to complete.
+	close(rendezvousCh)
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		c.Fatal("timed out waiting for pipeline to complete")
+	}
 }
 
-func (s *PipelineTestSuite) TestSourceErrorHandling(c *gc.C) {
-	expErr := xerrors.New("some error")
-	src := &sourceStub{data: stringPayloads(3), err: expErr}
-	sink := new(sinkStub)
+func (s StageTestSuite) TestDynamicWorkerPool(c *gc.C) {
+	numWorkers := 5
+	syncCh := make(chan struct{}, numWorkers)
+	rendezvousCh := make(chan struct{})
 
-	p := pipeline.New(testStage{c: c})
-	err := p.Process(context.TODO(), src, sink)
-	c.Assert(err, gc.ErrorMatches, "(?s).*pipeline source: some error.*")
-}
+	proc := pipeline.ProcessorFunc(func(_ context.Context, _ pipeline.Payload) (pipeline.Payload, error) {
+		// Signal that we have reached the sync point and wait for the
+		// green light to proceed by the test code.
+		syncCh <- struct{}{}
+		<-rendezvousCh
+		return nil, nil
+	})
 
-func (s *PipelineTestSuite) TestSinkErrorHandling(c *gc.C) {
-	expErr := xerrors.New("some error")
-	src := &sourceStub{data: stringPayloads(3)}
-	sink := &sinkStub{err: expErr}
+	src := &sourceStub{data: stringPayloads(numWorkers * 2)}
 
-	p := pipeline.New(testStage{c: c})
-	err := p.Process(context.TODO(), src, sink)
-	c.Assert(err, gc.ErrorMatches, "(?s).*pipeline sink: some error.*")
-}
+	p := pipeline.New(pipeline.DynamicWorkerPool(proc, numWorkers))
+	doneCh := make(chan struct{})
+	go func() {
+		err := p.Process(context.TODO(), src, nil)
+		c.Assert(err, gc.IsNil)
+		close(doneCh)
+	}()
 
-func (s *PipelineTestSuite) TestPayloadDiscarding(c *gc.C) {
-	src := &sourceStub{data: stringPayloads(3)}
-	sink := &sinkStub{}
+	// Wait for all workers to reach sync point. This means that the pool
+	// has scaled up to the max number of workers.
+	for i := 0; i < numWorkers; i++ {
+		select {
+		case <-syncCh:
+		case <-time.After(10 * time.Second):
+			c.Fatalf("timed out waiting for worker %d to reach sync point", i)
+		}
+	}
 
-	p := pipeline.New(testStage{c: c, dropPayloads: true})
-	err := p.Process(context.TODO(), src, sink)
-	c.Assert(err, gc.IsNil)
-	c.Assert(sink.data, gc.HasLen, 0, gc.Commentf("expected all payloads to be discarded by stage processor"))
+	// Allow workers to proceed and process the next batch of records
+	close(rendezvousCh)
+	select {
+	case <-doneCh:
+	case <-time.After(10 * time.Second):
+		c.Fatal("timed out waiting for pipeline to complete")
+	}
+
 	assertAllProcessed(c, src.data)
 }
 
-func assertAllProcessed(c *gc.C, payloads []pipeline.Payload) {
-	for i, p := range payloads {
-		payload := p.(*stringPayload)
-		c.Assert(payload.processed, gc.Equals, true, gc.Commentf("payload %d not processed", i))
-	}
-}
-
-type testStage struct {
-	c            *gc.C
-	dropPayloads bool
-	err          error
-}
-
-func (s testStage) Run(ctx context.Context, params pipeline.StageParams) {
-	defer func() {
-		s.c.Logf("[stage %d] exiting", params.StageIndex())
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case p, ok := <-params.Input():
-			if !ok {
-				return
-			}
-			s.c.Logf("[stage %d] received payload: %v", params.StageIndex(), p)
-			if s.err != nil {
-				s.c.Logf("[stage %d] emit error: %v", params.StageIndex(), s.err)
-				params.Error() <- s.err
-				return
-			}
-
-			if s.dropPayloads {
-				s.c.Logf("[stage %d] dropping payload: %v", params.StageIndex(), p)
-				p.MarkAsProcessed()
-				continue
-			}
-
-			s.c.Logf("[stage %d] emitting payload: %v", params.StageIndex(), p)
-			select {
-			case <-ctx.Done():
-				return
-			case params.Output() <- p:
-			}
-		}
-	}
-}
-
-type sourceStub struct {
-	index int
-	data  []pipeline.Payload
-	err   error
-}
-
-func (s *sourceStub) Next(context.Context) bool {
-	if s.err != nil || s.index == len(s.data) {
-		return false
+func (s StageTestSuite) TestBroadcast(c *gc.C) {
+	numProcs := 3
+	procs := make([]pipeline.Processor, numProcs)
+	for i := 0; i < numProcs; i++ {
+		procs[i] = makeMutatingProcessor(i)
 	}
 
-	s.index++
-	return true
-}
-func (s *sourceStub) Error() error { return s.err }
-func (s *sourceStub) Payload() pipeline.Payload {
-	return s.data[s.index-1]
-}
+	src := &sourceStub{data: stringPayloads(1)}
+	sink := new(sinkStub)
 
-type sinkStub struct {
-	data []pipeline.Payload
-	err  error
-}
+	p := pipeline.New(pipeline.Broadcast(procs...))
+	err := p.Process(context.TODO(), src, sink)
+	c.Assert(err, gc.IsNil)
 
-func (s *sinkStub) Consume(_ context.Context, p pipeline.Payload) error {
-	s.data = append(s.data, p)
-	return s.err
-}
-
-type stringPayload struct {
-	processed bool
-	val       string
-}
-
-func (s *stringPayload) Clone() pipeline.Payload { return &stringPayload{val: s.val} }
-func (s *stringPayload) MarkAsProcessed()        { s.processed = true }
-func (s *stringPayload) String() string          { return s.val }
-
-func stringPayloads(numValues int) []pipeline.Payload {
-	out := make([]pipeline.Payload, numValues)
-	for i := 0; i < len(out); i++ {
-		out[i] = &stringPayload{val: fmt.Sprint(i)}
+	expData := []pipeline.Payload{
+		&stringPayload{val: "0_0", processed: true},
+		&stringPayload{val: "0_1", processed: true},
+		&stringPayload{val: "0_2", processed: true},
 	}
-	return out
+	assertAllProcessed(c, src.data)
+
+	// Processors run as go-routines so outputs will be shuffled. We need
+	// to sort them first, so we can check for equality.
+	sort.Slice(expData, func(i, j int) bool {
+		return expData[i].(*stringPayload).val < expData[j].(*stringPayload).val
+	})
+	sort.Slice(sink.data, func(i, j int) bool {
+		return sink.data[i].(*stringPayload).val < sink.data[j].(*stringPayload).val
+	})
+
+	c.Assert(sink.data, gc.DeepEquals, expData)
+}
+
+func makeMutatingProcessor(index int) pipeline.Processor {
+	return pipeline.ProcessorFunc(func(_ context.Context, p pipeline.Payload) (pipeline.Payload, error) {
+		// Mutate payload to check that each processor got a copy
+		sp := p.(*stringPayload)
+		sp.val = fmt.Sprintf("%s_%d", sp.val, index)
+		return p, nil
+	})
+}
+
+func makePassThroughProcessor() pipeline.Processor {
+	return pipeline.ProcessorFunc(func(_ context.Context, p pipeline.Payload) (pipeline.Payload, error) {
+		return p, nil
+	})
 }
